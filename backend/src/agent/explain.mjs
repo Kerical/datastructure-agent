@@ -45,11 +45,6 @@ export async function handleAgentExplain(parsedBody, ctx = {}) {
   if (typeof runId !== 'string' || !runId.trim()) {
     return { status: 400, body: { error: { code: 'INVALID_INPUT', message: 'runId 为必填字符串' } } };
   }
-  if (hintLevel !== undefined) {
-    if (!Number.isInteger(hintLevel) || hintLevel < 1 || hintLevel > 3) {
-      return { status: 400, body: { error: { code: 'INVALID_INPUT', message: 'hintLevel 必须为 1、2 或 3' } } };
-    }
-  }
 
   // ===== P2 FIX: 索引类型校验，禁止任何类型转换 =====
   if (stepIndex === undefined || stepIndex === null) {
@@ -59,6 +54,12 @@ export async function handleAgentExplain(parsedBody, ctx = {}) {
     return { status: 400, body: { error: { code: 'INVALID_INPUT', message: 'stepIndex 必须为非负整数（禁止字符串等类型转换）' } } };
   }
   const idx = stepIndex; // 直接用原值，不再 Number()
+
+  if (hintLevel !== undefined) {
+    if (!Number.isInteger(hintLevel) || hintLevel < 1 || hintLevel > 3) {
+      return { status: 400, body: { error: { code: 'INVALID_INPUT', message: 'hintLevel 必须为 1、2 或 3' } } };
+    }
+  }
 
   if (typeof question !== 'string' || !question.trim() || question.length > 2000) {
     return { status: 400, body: { error: { code: 'INVALID_INPUT', message: 'question 必须为1至2000字符的非空字符串' } } };
@@ -85,23 +86,23 @@ export async function handleAgentExplain(parsedBody, ctx = {}) {
   const stepNo = step.stepIndex ?? idx;
 
   if (process.env.RATE_LIMIT !== 'false' && req) {
-    const limit = checkRateLimit(req);
+    const limit = checkRateLimit(req, bodySessionId);
     if (!limit.allowed) return { status: 429, body: { error: { code: 'RATE_LIMIT_EXCEEDED', message: '请求过于频繁，请稍后再试', retryAfter: Math.ceil(limit.resetIn / 1000) } } };
   }
   if (mode !== 'real' || isIrrelevantQuestion(question) || (!ev && arr.length === 0)) recordMockCall(req, bodySessionId);
 
   // ===== P2 FIX: 空数组判断修正 =====
+  // 空数组 + init 事件（ev 存在）是合法状态，走正常解释
   // 只有 step 完全没有 event（真正信息不足）才返回信息不足
-  // 空数组 + 有 event（如 init）是合法状态，应正常解释
   if (!ev && arr.length === 0) {
     return {
       status: 200,
       body: {
         runId, stepIndex: idx,
-        answer: '当前步骤信息不足，无法进行分析。请确认算法已正确运行。',
+        answer: '当前数组为空，搜索区间 left=0, right=-1，表示区间为空，目标元素不存在。',
         stepRefs: [{ runId, stepIndex: idx, event: ev, left, right, mid }],
         sourceRefs: [],
-        usage: { model: 'mock', cost: 0, mock: true, infoInsufficient: true }
+        usage: { model: 'mock', cost: null, mock: true, infoInsufficient: true }
       }
     };
   }
@@ -136,7 +137,7 @@ export async function handleAgentExplain(parsedBody, ctx = {}) {
         hintLevel: level,
         stepRefs: [{ runId, stepIndex: idx, event: ev, left, right, mid }],
         sourceRefs: [], knowledgeUsed: false, retrieval: { method: retrieval.method, status: 'irrelevant', matchedCardIds: [], contextCardId: null, matches: [] },
-        usage: { model: 'mock', cost: 0, mock: true, irrelevant: true }
+        usage: { model: 'mock', cost: null, mock: true, irrelevant: true }
       }
     };
   }
@@ -146,7 +147,7 @@ export async function handleAgentExplain(parsedBody, ctx = {}) {
     return { status: 200, body: { runId, stepIndex: idx, hintLevel: level,
       answer: '当前已核验知识卡中没有找到与你的问题匹配的资料，暂不能给出有资料依据的解释。当前真实步骤为 ' + ev + '，区间 [' + left + ', ' + right + ']。请补充与二分查找有关的具体问题。',
       stepRefs: [{ runId, stepIndex: idx, event: ev, left, right, mid }], sourceRefs: [], knowledgeUsed: false, retrieval,
-      usage: { model: 'local', cost: 0, mock: true, insufficientKnowledge: true } } };
+      usage: { model: 'local', cost: null, mock: true, insufficientKnowledge: true } } };
   }
 
   // ===== 真实模型模式 =====
@@ -162,7 +163,7 @@ export async function handleAgentExplain(parsedBody, ctx = {}) {
       const allocation = reserveModelCall(req, bodySessionId, maximumTokens);
       if (!allocation.allowed) return { status: allocation.code === 'BUDGET_UNAVAILABLE' ? 503 : 429, body: { error: { code: allocation.code, message: '模型调用额度不足或预算记录不可用，请检查后端配置' } } };
       receipt = allocation.receipt;
-      // P2 FIX: 不再硬编码 15000，读 MODEL_TIMEOUT_MS
+      // P2 FIX: 读 MODEL_TIMEOUT_MS，不再硬编码 15000
       const timeoutMs = Number(process.env.MODEL_TIMEOUT_MS) || 15000;
       const result = await provider.chat(messages, { timeoutMs, maxTokens });
       const elapsedMs = Date.now() - startedAt;
@@ -186,7 +187,7 @@ export async function handleAgentExplain(parsedBody, ctx = {}) {
           answer: finalAnswer + selectedCards.map(cardText).join(''),
           stepRefs: [{ runId, stepIndex: idx, event: ev, left, right, mid, knowledgeCard: retrieval.contextCardId, array: arr.length <= 20 ? arr : undefined, target }],
           sourceRefs: refs,
-      retrieval,
+          retrieval,
           knowledgeUsed: selectedCards.length > 0,
           usage: {
             model: result.model || 'deepseek-chat',
@@ -263,9 +264,10 @@ export async function handleAgentExplain(parsedBody, ctx = {}) {
       answer,
       stepRefs: [{ runId, stepIndex: idx, event: ev, left, right, mid, knowledgeCard: retrieval.contextCardId, array: arr.length <= 20 ? arr : undefined, target }],
       sourceRefs: refs,
-          retrieval,
+      retrieval,
       knowledgeUsed: selectedCards.length > 0,
-      usage: { model: 'mock', cost: 0, mock: true }
+      // P2 FIX: Mock cost 改为 null（无模型费用），修复契约回归
+      usage: { model: 'mock', cost: null, mock: true }
     }
   };
 }

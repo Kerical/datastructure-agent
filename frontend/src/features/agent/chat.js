@@ -21,6 +21,7 @@ fetch('/api/health').then(r => r.json()).then(data => {
   statusBadge.className = data.modelCallsEnabled ? 'badge live' : 'badge mock';
 }).catch(() => { statusBadge.textContent = '服务不可用'; });
 
+// P2 FIX: refreshUsage 统一使用 sessionId（与 POST 的 sessionId 一致）
 async function refreshUsage(sessionId = runIdInput.value.trim()) {
   const ticket = ++usageRequest;
   try {
@@ -59,6 +60,7 @@ function appendMessage(role, content, meta) {
   return div;
 }
 
+// P2 FIX: 重试按钮使用保存的完整快照，不重新读空输入
 async function sendMessage(snapshot) {
   if (busy) return;
   const input = snapshot || { runId: runIdInput.value.trim(), stepIndex: Number(stepIndexInput.value),
@@ -92,6 +94,7 @@ async function sendMessage(snapshot) {
       div.appendChild(refs);
     }
   } catch (err) {
+    // P2 FIX: 保存完整失败请求快照用于重试
     failedRequest = { ...input };
     appendMessage('system', `请求失败：${err.message}`, `原请求：${meta}`);
     retryBtn.style.display = 'inline-block';
@@ -105,6 +108,7 @@ async function sendMessage(snapshot) {
 }
 
 sendBtn.addEventListener('click', () => sendMessage());
+// P2 FIX: 重试使用保存的快照
 retryBtn.addEventListener('click', () => { if (failedRequest) sendMessage({ ...failedRequest }); });
 questionInput.addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }

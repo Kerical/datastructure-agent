@@ -21,9 +21,11 @@ export class DeepSeekProvider {
             max_tokens: options.maxTokens ?? 1024, stream: false }),
           signal: controller.signal
         });
-        // Do not echo upstream bodies (which may include sensitive diagnostic data).
+        // P2 FIX: 超时保护覆盖 response.json()（body 读取）
+        // timer 在 response.json() 完成后才 clear
         if (!response.ok) throw new Error('MODEL_CALL_FAILED');
         const data = await response.json();
+        clearTimeout(timer); // P2 FIX: 移到 json() 之后
         const raw = data.usage;
         const validUsage = raw && [raw.prompt_tokens, raw.completion_tokens, raw.total_tokens]
           .every(n => Number.isSafeInteger(n) && n >= 0) && raw.total_tokens === raw.prompt_tokens + raw.completion_tokens;
@@ -33,9 +35,10 @@ export class DeepSeekProvider {
       })();
       return await Promise.race([request, timeout]);
     } catch (err) {
+      clearTimeout(timer);
       if (controller.signal.aborted || err.message === 'MODEL_TIMEOUT') throw new Error('MODEL_TIMEOUT');
       throw new Error('MODEL_CALL_FAILED');
-    } finally { clearTimeout(timer); }
+    }
   }
 
   estimateCost(usage) {
@@ -43,7 +46,6 @@ export class DeepSeekProvider {
     const output = Number(process.env.MODEL_OUTPUT_CNY_PER_MILLION);
     if (!process.env.MODEL_INPUT_CNY_PER_MILLION || !process.env.MODEL_OUTPUT_CNY_PER_MILLION ||
         !Number.isFinite(input) || input < 0 || !Number.isFinite(output) || output < 0) return null;
-    // Preserve small costs; rounding each call to four decimals loses real usage.
     return (usage.prompt_tokens * input + usage.completion_tokens * output) / 1000000;
   }
 }
